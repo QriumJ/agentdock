@@ -1,13 +1,16 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	goruntime "runtime"
 	"strings"
 	"testing"
 
 	"github.com/uvwt/agentdock/internal/observability"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func TestRuntimeAnalyticsRecordsSafeToolMetadata(t *testing.T) {
@@ -30,6 +33,9 @@ func TestRuntimeAnalyticsRecordsSafeToolMetadata(t *testing.T) {
 		t.Fatalf("unknown tool name was retained: %#v", snapshot.RecentCalls[0])
 	}
 	known := snapshot.RecentCalls[1]
+	if known.TraceID != "" || known.SpanID != "" {
+		t.Fatalf("default no-op call unexpectedly created trace identifiers = %q / %q", known.TraceID, known.SpanID)
+	}
 	if known.Tool != "agentdock_context" || known.Source != observability.SourceMCP {
 		t.Fatalf("known call metadata = %#v", known)
 	}
@@ -73,5 +79,59 @@ func TestRuntimeAnalyticsIncludesCommandStages(t *testing.T) {
 	if record.Stages[0].Name != observability.StageCommandStart ||
 		record.Stages[1].Name != observability.StageCommandForegroundWait {
 		t.Fatalf("command stages = %#v", record.Stages)
+	}
+}
+
+func TestRuntimeToolLogOmitsTraceIdentifiersWithoutSDK(t *testing.T) {
+	rt := newRuntimeValidationTestRuntime(t)
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	ctx := observability.WithSource(context.Background(), observability.SourceMCP)
+	if _, err := rt.Call(ctx, "agentdock_context", map[string]any{}); err != nil {
+		t.Fatalf("agentdock_context: %v", err)
+	}
+	record := rt.observer.Snapshot().RecentCalls[0]
+	if record.TraceID != "" || record.SpanID != "" {
+		t.Fatalf("default no-op call unexpectedly created trace identifiers: %#v", record)
+	}
+	body := logs.String()
+	for _, forbidden := range []string{"\"trace_id\"", "\"span_id\""} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("tool log unexpectedly contains %s: %s", forbidden, body)
+		}
+	}
+}
+
+func TestRuntimeToolLogCorrelatesRemoteTraceWithoutFakeChildSpan(t *testing.T) {
+	rt := newRuntimeValidationTestRuntime(t)
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	traceID, _ := trace.TraceIDFromHex("4bf92f3577b34da6a3ce929d0e0e4736")
+	parentSpanID, _ := trace.SpanIDFromHex("00f067aa0ba902b7")
+	parent := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID: traceID, SpanID: parentSpanID, TraceFlags: trace.FlagsSampled, Remote: true,
+	})
+	ctx := trace.ContextWithRemoteSpanContext(context.Background(), parent)
+	ctx = observability.WithSource(ctx, observability.SourceNexus)
+	if _, err := rt.Call(ctx, "agentdock_context", map[string]any{}); err != nil {
+		t.Fatalf("agentdock_context: %v", err)
+	}
+
+	record := rt.observer.Snapshot().RecentCalls[0]
+	if record.TraceID != traceID.String() || record.SpanID != "" {
+		t.Fatalf("remote correlation record = %#v", record)
+	}
+	body := logs.String()
+	if !strings.Contains(body, "\"trace_id\":\""+traceID.String()+"\"") {
+		t.Fatalf("tool log missing remote trace id: %s", body)
+	}
+	if strings.Contains(body, "\"span_id\"") {
+		t.Fatalf("tool log invented a local child span id: %s", body)
 	}
 }
