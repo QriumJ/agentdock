@@ -314,7 +314,6 @@ function Invoke-Installer {
     )
 
     $arguments = @{
-        Version = 'latest'
         OfflineArchive = $Archive
         OfflineChecksumFile = $Checksum
         InstallDir = $installDir
@@ -410,7 +409,6 @@ try {
 
     # Fresh base install does not know about Cloudflare Tunnel.
     & $InstallerPath `
-        -Version latest `
         -OfflineArchive $sourcePayload.Archive `
         -OfflineChecksumFile $sourcePayload.Checksum `
         -InstallDir $installDir `

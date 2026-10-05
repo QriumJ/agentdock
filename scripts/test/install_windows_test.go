@@ -1081,6 +1081,9 @@ func TestWindowsNamedTunnelLifecycleCoversSoftFailureRecovery(t *testing.T) {
 	if strings.Contains(lifecycle, "OfflineCloudflaredBinary") {
 		t.Fatal("Named Tunnel lifecycle must provision its fake dependency through the component store, not the installer")
 	}
+	if strings.Contains(lifecycle, "Version = 'latest'") {
+		t.Fatal("Named Tunnel lifecycle must not pass the removed installer Version parameter through splatting")
+	}
 
 	fake := strings.ReplaceAll(string(fakeData), "\r\n", "\n")
 	for _, want := range []string{
@@ -1140,6 +1143,11 @@ func TestWindowsStandardUserE2EWaitsForDirectProcessWithTimeout(t *testing.T) {
 	}
 	if strings.Contains(launcher, "-Wait `\n        -PassThru") {
 		t.Fatal("Windows standard-user E2E must not use Start-Process -Wait because installer descendants are long-lived")
+	}
+	for label, content := range map[string]string{"launcher": launcher, "child": child} {
+		if strings.Contains(content, "$Version") {
+			t.Fatalf("Windows standard-user E2E %s must not reintroduce public historical-version selection", label)
+		}
 	}
 	for _, want := range []string{
 		"[string] $CompletionFile = ''",

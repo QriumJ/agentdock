@@ -1,17 +1,32 @@
 # Release 下载分发
 
-AgentDock 的正式版本仍以 GitHub Release 为唯一历史档案。Release workflow 在正式 GitHub Release 发布成功后，把当前最新版的 **AgentDock 第一方发布物** 镜像到 Cloudflare R2，供 NexusDock 官网和客户端更新使用。
+AgentDock 的官方第一方二进制分发边界统一为 `https://download.nexusdock.co`。桌面端检查更新、安装脚本、AgentDock 归档、Setup/DMG、校验文件和第一方 component catalog 不依赖 AgentDock GitHub Release 下载地址；GitHub Release 继续承担 Release Notes、社区入口和历史下载归档职责。
 
-第三方依赖不进入这条镜像链。当前 cloudflared 由 AgentDock 的第一方 component catalog 固定版本、固定官方 URL、artifact format 和 SHA-256；客户端直接从 Cloudflare 官方 GitHub Release 下载。
+第三方依赖不进入 AgentDock 镜像链。cloudflared 由 AgentDock 的第一方 component catalog 固定 Cloudflare 官方 Release URL、artifact format 和 SHA-256，客户端直接从 Cloudflare 官方 GitHub Release 下载。Microsoft .NET Windows Desktop Runtime 与 Windows App Runtime 同样由安装器按固定的微软官方来源获取，不上传到 AgentDock R2。
 
-## R2 对象布局
+## 产品契约
 
-R2 只保留当前稳定版的 AgentDock 第一方发布物和第一方 metadata：
+AgentDock 的公开安装与更新只支持**当前稳定版**：
+
+- `install.sh` 不提供 `--version`；
+- `install.ps1` 不提供 `-Version`；
+- 桌面 self-update 只读取 `https://download.nexusdock.co/latest.json`；
+- component catalog 只通过 `https://download.nexusdock.co/latest/agentdock-component-catalog.json` 获取；
+- 客户端运行时不包含 AgentDock GitHub Release fallback；
+- GitHub 的历史 Release 可以用于开发、排障和人工归档下载，但不属于产品安装 API。
+
+测试和离线安装仍可通过现有测试/离线入口注入本地 payload 或测试下载基址；这些能力不构成面向用户的历史版本安装功能。
+
+## R2 对象模型
+
+R2 底层仍使用版本化不可变目录，避免覆盖 `latest` 文件造成半发布：
 
 ```text
 latest.json
 releases/
-└── vX.Y.Z/
+├── vX.Y.Z/       # 上一个稳定版，临时保留用于紧急回退
+│   └── ...
+└── vX.Y.(Z+1)/   # 当前稳定版
     ├── AgentDockSetup-amd64.exe
     ├── AgentDockSetup-amd64.exe.sha256
     ├── AgentDockSetup-arm64.exe
@@ -29,40 +44,48 @@ releases/
     └── install.ps1.sha256
 ```
 
-以下内容明确不进入 AgentDock GitHub Release 或 R2：
+版本目录内对象不可覆盖：如果同一个 key 已存在但 SHA-256 不同，发布立即失败。这样当前版本在上传、校验完成之前不会影响现有用户。
 
-- `cloudflared_windows_amd64.exe`
-- `cloudflared_darwin_amd64`
-- `cloudflared_darwin_arm64`
-- Microsoft .NET / Windows App Runtime installer
+`latest.json` 是桌面稳定版唯一可变指针，使用最小 GitHub Release 兼容结构：`tag_name` 和 `assets[].name/browser_download_url`。所有 `browser_download_url` 指向当前版本的 `https://download.nexusdock.co/releases/<tag>/...`。
 
-`latest.json` 使用 GitHub Release API 的最小兼容结构：`tag_name` 和 `assets[].name/browser_download_url`。这样客户端以后可以把最新版元数据源切到 NexusDock 下载域名，而不需要维护第二套 Release 数据模型。
+下载 Worker 为官网保留平台友好别名，同时允许安全的 `/latest/<asset-name>` 从 `latest.json` 解析到当前版本化对象，例如：
 
-发布顺序是：
+- `/latest/install.sh`
+- `/latest/agentdock_linux_amd64.tar.gz`
+- `/latest/agentdock-component-catalog.json`
 
-1. GitHub Release 候选产物经过跨平台验证。
-2. Release CI 额外验证仓库 pinned 的第三方依赖：固定 URL、固定 SHA-256、平台信任和版本；只验证，不上传第三方 binary。
-3. 正式公开 AgentDock GitHub Release。
-4. 下载已验证的 `agentdock-release-dist`。
-5. 上传 `releases/<tag>/` 下的 AgentDock 第一方不可变对象并通过 R2 API 校验。
-6. 从公开下载域名逐个验证版本化 URL。
-7. 最后更新根目录 `latest.json`；成功后再清理 R2 旧版本对象。
+Android 使用独立的 `android/latest.json` / `android/releases/` 分发契约，不与桌面 `latest.json` 混用。
 
-任何步骤在更新 `latest.json` 前失败时，旧版下载入口保持不变；更新之后的清理失败只会留下旧对象，不会破坏当前最新版。
+## R2 保留策略
 
-## R2 rewrite 边界
+R2 只保留两个完整稳定版本：
 
-R2 中的 `install.sh` 会把默认 AgentDock Release 基础地址改写为同版本的
-`https://download.nexusdock.co/releases/<tag>`，并重新生成 `install.sh.sha256`。
-GitHub Release 中的原始 `install.sh` 不变，因此历史版本仍保持 GitHub 自身的可复现下载链路。
+1. 当前 `latest.json` 指向的稳定版；
+2. 发布前 `latest.json` 指向的上一稳定版。
 
-`agentdock-component-catalog.json` 是 AgentDock 第一方 metadata，因此 catalog 文件本身可以进入 R2；但 catalog 内的第三方 artifact URL **不能**被镜像阶段改写。以 cloudflared 为例，URL 必须始终保持：
+新版本完成上传并通过公开 URL 校验后，Release workflow 在切换 `latest.json` **之前**删除更早的 `releases/<tag>/` 前缀，只保留候选新版本和发布前 `latest.json` 指向的当前稳定版。清理失败时 workflow 直接停止，用户入口仍停留在旧稳定版。
+
+如果同一 Release workflow 被重跑，或者发布前记录的上一稳定版前缀已经不存在，workflow 不猜测其他前缀的语义，也不执行删除；宁可暂时多保留对象，也不把失败上传的半成品误当成上一稳定版。下一次正常新版本发布会再次按当前/上一稳定版策略收敛。
+
+正常发布完成后，R2 目标状态是两个完整稳定版本。它们是发布原子性和紧急回退缓冲，不是公开的历史版本安装功能。
+
+现有较老 GitHub Release **不迁移回 R2**。GitHub 继续保存历史 Release；R2 从本策略生效后只维护当前与上一稳定版。
+
+## Bootstrap 约定
+
+源码仓库和正式 Release 中的 `install.sh` / `install.ps1` 都只访问：
 
 ```text
-https://github.com/cloudflare/cloudflared/releases/download/<pinned-version>/...
+https://download.nexusdock.co/latest
 ```
 
-R2 prepare 只会重新生成 catalog 文件自身的 SHA-256，不会要求本地存在 cloudflared binary，也不会生成 Cloudflare artifact 的 R2 副本。
+Release 打包阶段不再二次改写 bootstrap 为版本化下载地址，也不再维护 `prepare-distribution` 之类的脚本重写步骤。GitHub Release 与 R2 直接发布同一份 bootstrap 字节及其 checksum。
+
+bootstrap 下载到 payload 后，实际安装版本由 payload 自身的版本元数据确定；Windows 安装结果也记录实际 payload 版本，而不是信任外部传入的版本参数。
+
+## 第三方 component 边界
+
+`agentdock-component-catalog.json` 是 AgentDock 第一方 metadata，因此 catalog 文件本身进入 GitHub Release 和 R2；catalog 中 cloudflared 的 artifact URL 始终保持 Cloudflare 官方固定版本地址，不能改写为 NexusDock R2。
 
 cloudflared 的信任根位于仓库审计过的 `packaging/components/cloudflared.json`：
 
@@ -70,16 +93,31 @@ cloudflared 的信任根位于仓库审计过的 `packaging/components/cloudflar
 - URL 固定为 Cloudflare 官方 Release；
 - Windows format 为 `binary`；
 - macOS format 为 `tgz`；
-- catalog SHA-256 描述下载 artifact；
-- 安装后的 `active.json` SHA-256 描述最终本地 binary，两者语义不混用。
+- upstream artifact SHA-256 固定；
+- Release CI 在对应平台验证 digest、签名/代码签名、归档结构和版本；
+- AgentDock Release/R2 不包含 cloudflared binary。
+
+Windows 的微软共享 Runtime 采用同一原则：AgentDock Setup 只携带固定 metadata/安装逻辑，缺失时从微软官方固定来源获取并验证 Authenticode，不在 R2 维护第三方副本。
+
+## 发布顺序
+
+1. 构建、签名并生成唯一 AgentDock release candidate，同时生成固定官方第三方来源的 component catalog。
+2. 完成 Linux、macOS、Windows、容器、第三方 upstream 和 GitHub draft 验证。
+3. 上传 `releases/<tag>/` 的第一方资产到 R2；同 key 不允许不同 digest 覆盖。
+4. 从 `download.nexusdock.co/releases/<tag>/...` 逐个验证公开版本化 URL。
+5. 读取发布前的 `latest.json` tag，并在用户入口仍指向旧稳定版时，保留候选新 tag 与当前稳定 tag、删除更早 R2 Release 前缀。
+6. 清理成功后更新并验证根目录 `latest.json`，此时候选新 tag 成为当前稳定版，旧稳定 tag 成为上一稳定版。
+7. 最后公开 GitHub Release，并提升容器 `latest` aliases。
+
+这样 R2 上传、公开 URL 校验或保留策略执行失败时都不会提前切换用户入口；只有这些步骤全部成功后才移动 `latest.json`，同时保持一个上一稳定版用于紧急回退。
 
 ## GitHub Actions 配置
 
 Repository Variables：
 
 - `R2_ACCOUNT_ID`：Cloudflare Account ID。
-- `R2_BUCKET`：用于最新版 AgentDock 发布物镜像的 R2 bucket。
-- `R2_PUBLIC_BASE_URL`：R2 自定义公开域名，例如 `https://download.nexusdock.co`，不要带末尾 `/`。
+- `R2_BUCKET`：AgentDock 正式 Release bucket。
+- `R2_PUBLIC_BASE_URL`：公开分发域名，当前必须为 `https://download.nexusdock.co`。
 
 Repository Secrets：
 
@@ -87,5 +125,3 @@ Repository Secrets：
 - `R2_SECRET_ACCESS_KEY`
 
 R2 凭据只需要目标 bucket 的对象读写权限，不需要 Cloudflare 账号级管理员权限。
-
-历史版本、Release Notes 和旧安装包继续从 GitHub Releases 获取。R2 不承担历史归档，也不承担 Microsoft Runtime 或第三方组件镜像职责。

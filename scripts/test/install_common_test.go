@@ -70,6 +70,47 @@ func TestUnifiedInstallerEntryOwnsUnixBootstrap(t *testing.T) {
 	}
 }
 
+func TestInstallerDefaultsUseNexusDockDistribution(t *testing.T) {
+	unixData, err := os.ReadFile("../install/install.sh")
+	if err != nil {
+		t.Fatalf("read install.sh: %v", err)
+	}
+	for _, want := range []string{
+		`DEFAULT_BASE_URL="https://download.nexusdock.co/latest"`,
+	} {
+		if !strings.Contains(string(unixData), want) {
+			t.Fatalf("install.sh missing canonical distribution URL %q", want)
+		}
+	}
+	for _, forbidden := range []string{
+		"VERSIONED_RELEASE_BASE_URL",
+		"AGENTDOCK_RELEASE_VERSION",
+		"--version latest|vX.Y.Z",
+		"RELEASE_VERSION",
+	} {
+		if strings.Contains(string(unixData), forbidden) {
+			t.Fatalf("install.sh must only install the current stable release; found %q", forbidden)
+		}
+	}
+
+	windowsData, err := os.ReadFile("../install/install.ps1")
+	if err != nil {
+		t.Fatalf("read install.ps1: %v", err)
+	}
+	if want := "$defaultReleaseBaseUrl = 'https://download.nexusdock.co/latest'"; !strings.Contains(string(windowsData), want) {
+		t.Fatalf("install.ps1 missing canonical distribution URL %q", want)
+	}
+	for _, forbidden := range []string{
+		"[string] $Version = 'latest'",
+		"$versionedReleaseBaseUrl",
+		"RequestedVersion",
+	} {
+		if strings.Contains(string(windowsData), forbidden) {
+			t.Fatalf("install.ps1 must only install the current stable release; found %q", forbidden)
+		}
+	}
+}
+
 func TestUnifiedInstallerFreshFlowOrdersCoreNexusThenCloudflare(t *testing.T) {
 	data, err := os.ReadFile("../install/install.sh")
 	if err != nil {
